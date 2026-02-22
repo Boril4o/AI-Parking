@@ -1,6 +1,6 @@
 import pygame
 
-scale = 50  # 1 meter = 50 pixels
+scale = 25  # 1 meter = 50 pixels
 
 def meters_to_pixels(meters):
     return int(meters * scale)
@@ -10,6 +10,7 @@ class Colors:
     CAR = (255, 0, 0)
     PARKING_SPOT = (200, 200, 255)
     HOLE = (0, 0, 0)
+    PARKED_CAR = (0, 0, 255)
 
 class EnvironmenRenderer:
     def __init__(self, width, height):
@@ -17,11 +18,13 @@ class EnvironmenRenderer:
         self.screen = pygame.display.set_mode((meters_to_pixels(width), meters_to_pixels(height)))
         self.clock = pygame.time.Clock()
 
-    def render(self, walls, car, parking_spots):
+    def render(self, walls, car, parked_cars, parking_spots):
         self.screen.fill((255, 255, 255))
     
         self.draw_polygon(self.screen, walls, Colors.WALL)
         self.draw_polygon(self.screen, car, Colors.CAR)  # Red car
+        for parked_car in parked_cars:
+            self.draw_polygon(self.screen, parked_car, Colors.PARKED_CAR)  # Red parked cars
 
         for spot in parking_spots:
             self.draw_polygon(self.screen, spot, Colors.PARKING_SPOT, width=2)  # Light blue with outline
