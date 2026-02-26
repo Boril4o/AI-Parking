@@ -65,6 +65,8 @@ class ParkingWarehouse:
                 parked_car = affinity.translate(rotated_car, final_x, final_y)
                 self.parked_cars.append(parked_car)
 
+        print(self.get_car_raycast())
+
 
     def get_car_raycast(self):
         coords = list(self.car.exterior.coords[:-1])  # Exclude the closing point
@@ -72,6 +74,7 @@ class ParkingWarehouse:
 
         lines = []
 
+        #Corner rays
         for index in range(n):
             p_prev = coords[(index - 1) % n]
             p_curr = coords[index]
@@ -106,7 +109,31 @@ class ParkingWarehouse:
 
             line = [(p_curr[0], p_curr[1]), (new_x, new_y)]
             lines.append(line)
+        
+        #side rays
+        for index in range(n):
+            p_curr = coords[index]
+            p_next = coords[(index + 1) % n]
 
+            midpoint = [(p_curr[0] + p_next[0]) / 2, (p_curr[1] + p_next[1]) / 2]
+            edge_vector = [p_next[0] - p_curr[0], p_next[1] - p_curr[1]]
+
+            dx, dy = edge_vector
+            normal = [dy, -dx]
+            len_n1 = math.hypot(normal[0], normal[1])
+
+            if len_n1 > 0:
+                normal[0] /= len_n1
+                normal[1] /= len_n1
+
+            angle_radians = math.atan2(normal[1], normal[0])
+
+            new_x = midpoint[0] + self.raycast_length * math.cos(angle_radians)
+            new_y = midpoint[1] + self.raycast_length * math.sin(angle_radians)
+
+            line = [(midpoint[0], midpoint[1]), (new_x, new_y)]
+            lines.append(line)
+            
         return lines
 
 
