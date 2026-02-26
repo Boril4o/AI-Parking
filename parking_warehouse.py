@@ -14,6 +14,7 @@ class ParkingWarehouse:
     playground_height = (parking_spot_height * 2) + (wall_width * 2) + 5
     parking_spot_count_on_side = 4
     parked_cars_count = 4
+    raycast_length = 1
 
     def __init__(self):
         self.walls = Polygon(
@@ -67,17 +68,46 @@ class ParkingWarehouse:
 
     def get_car_raycast(self):
         coords = list(self.car.exterior.coords[:-1])  # Exclude the closing point
+        n = len(coords)
 
-        top_right = coords[0]
-        bottom_right = coords[1]
-        bottom_left = coords[2]
-        top_left = coords[3]
+        lines = []
 
-        top_right_angle = math.radians(45)
-        bottom_right_angle = math.radians(135)
-        bottom_left_angle = math.radians(-135)
-        top_left_angle = math.radians(-45)
-        
+        for index in range(n):
+            p_prev = coords[(index - 1) % n]
+            p_curr = coords[index]
+            p_next = coords[(index + 1) % n]
+
+            in_dx = p_curr[0] - p_prev[0]
+            in_dy = p_curr[1] - p_prev[1]
+    
+            out_dx = p_next[0] - p_curr[0]
+            out_dy = p_next[1] - p_curr[1]
+
+            n1_x, n1_y = in_dy, -in_dx
+            n2_x, n2_y = out_dy, -out_dx
+
+            len_n1 = math.hypot(n1_x, n1_y)
+            len_n2 = math.hypot(n2_x, n2_y)
+
+            if len_n1 > 0:
+                n1_x /= len_n1
+                n1_y /= len_n1
+            if len_n2 > 0:
+                n2_x /= len_n2
+                n2_y /= len_n2
+
+            nv_x = n1_x + n2_x
+            nv_y = n1_y + n2_y
+
+            angle_radians = math.atan2(nv_y, nv_x)
+
+            new_x = p_curr[0] + self.raycast_length * math.cos(angle_radians)
+            new_y = p_curr[1] + self.raycast_length * math.sin(angle_radians)
+
+            line = [(p_curr[0], p_curr[1]), (new_x, new_y)]
+            lines.append(line)
+
+        return lines
 
 
     def get_obs(self):
