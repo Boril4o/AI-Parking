@@ -33,10 +33,26 @@ class ParkingWarehouse(gym.Env):
     turn_speed = 50.0
     car_speed = 50.0
     dt = 1 / 60
+    max_step = 1000
+
+    step_penalty = -0.01
+    collision_penalty = -10
+    parked_reward = 10
+    closer_to_park_spot_reward = 0.10
 
     def __init__(self):
         """Initialize pygame, convert all geometry from meters to pixels,
         and pre-compute static structures like walls and parking spots."""
+
+        self.observation_space = gym.spaces.Dict({
+            "distance": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
+            "car_angle": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
+            "velocity": gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
+            "angular_velocity": gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
+            "raycasts": gym.spaces.Box(0, 1, shape=(8,), dtype=np.float32),
+            })
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
         pygame.init()
         self.screen = None
         self.clock = pygame.time.Clock()
@@ -98,12 +114,15 @@ class ParkingWarehouse(gym.Env):
         self.angular_velocity = 0
         self.car_angle = 0
         self.car_pos = self.car_default_center_pixels
+        self.closest_to_park_spot = 1
 
         self.original_car_surf = pygame.Surface((self.car_width_pixels, self.car_height_pixels), pygame.SRCALPHA)
         self.original_car_surf.fill(Colors.CAR)
         self.original_car_rect = self.original_car_surf.get_rect(center=self.car_pos)
 
         self.static_BG.fill(Colors.BACKGROUND)
+
+        self.current_step = 0
 
         # Randomly mark some parking spots as occupied by parked cars
         parked_cars = []
@@ -124,7 +143,7 @@ class ParkingWarehouse(gym.Env):
         self.obstacles.extend(parked_cars)
 
         # Choose one of the free spots as the target parking location
-        self.target_parking_spot = empty_parking_spots[self.np_random.integers(0, len(empty_parking_spots)) - 1]
+        self.target_parking_spot = empty_parking_spots[self.np_random.integers(0, len(empty_parking_spots))]
 
         self.obstacles_surf.fill((0, 0, 0, 0))
 
@@ -144,6 +163,8 @@ class ParkingWarehouse(gym.Env):
         # Pre-computed masks used for pixel-perfect collision detection
         self.obstacles_mask = pygame.mask.from_surface(self.obstacles_surf)
         self.car_mask = pygame.mask.from_surface(self.original_car_surf)
+
+        return self.get_obs, {}
 
     def render(self):
         """Draw the current frame: static background, car and raycasts."""
@@ -248,12 +269,12 @@ class ParkingWarehouse(gym.Env):
         # Distance from car center to the target parking spot center, normalized
         distance_between = Vector2(self.car_pos).distance_to(Vector2(self.target_parking_spot.center)) / self.max_distance_car_spot
 
-        print(f"angular_velocity: {car_angular_velocity}")
-        print(f"velocity: {car_velocity}")
-        print(f"angle: {angle}")
-        print(f"distance: {distance_between}")
-        print(f"raycasts: {raycasts}")
-        print("-------------------------------------------")
+        #print(f"angular_velocity: {car_angular_velocity}")
+        #print(f"velocity: {car_velocity}")
+        #print(f"angle: {angle}")
+        #print(f"distance: {distance_between}")
+        #print(f"raycasts: {raycasts}")
+        #print("-------------------------------------------")
 
         return {
             # raycasts: values from 0.0 (very close obstacle) to 1.0 (no hit)
@@ -274,6 +295,8 @@ class ParkingWarehouse(gym.Env):
 
         steer_action = np.clip(steer_action, -1.0, 1.0)
         gas_action = np.clip(gas_action, -1.0, 1.0)
+
+        self.current_step += 1
 
         # Turning rate grows with steering and gas, capped by turn_speed.
         # Negative values mean turning in the opposite direction.
@@ -311,13 +334,30 @@ class ParkingWarehouse(gym.Env):
         # Update mask to match rotated car for collision checks
         self.car_mask = pygame.mask.from_surface(self.rotated_car_surf)
 
-        # Parking check is side-effect only (for now)
-        self.check_parking_spot()
-
-        observation = self.get_obs()
         reward = 0
-        terminated = self.check_collison()
+        terminated = False
+        observation = self.get_obs()
         truncated = False
+
+        parking_info = self.check_parking_spot(observation["distance"])
+
+        if self.check_collison():
+            reward += self.collision_penalty
+            terminated = True
+
+        if observation["distance"] < self.closest_to_park_spot:
+            self.closer_to_park_spot = observation["distance"]
+            reward += self.closer_to_park_spot_reward
+
+        if parking_info[0]:
+            reward += self.parked_reward
+            terminated = True
+
+        if self.current_step >= self.max_step:
+            truncated = True
+
+        reward += self.step_penalty
+        
         info = {}
 
         return observation, reward, terminated, truncated, info
@@ -331,12 +371,18 @@ class ParkingWarehouse(gym.Env):
             return True
         return False
 
-    def check_parking_spot(self):
+    def check_parking_spot(self, distance: float):
         """Check whether the car is fully inside the target spot and well aligned.
 
         Returns a tuple (is_inside, angle_score) where angle_score is in [0, 1]
         and rewards being parallel to the parked cars (i.e., aligned with spot).
         """
+
+        result = (False, 0)
+
+        if distance > 0.01:
+            return result
+
         car_top_left_corner_offset = Vector2(-self.car_width_pixels / 2, -self.car_height_pixels / 2)
         car_bottom_right_corner_offset = Vector2(self.car_width_pixels / 2, self.car_height_pixels / 2)
 
@@ -354,8 +400,12 @@ class ParkingWarehouse(gym.Env):
             and self.target_parking_spot.topleft[1] < car_bottom_right_pos.y < self.target_parking_spot.bottomright[1]):
             # angle_diff rewards car angles close to perpendicular relative to spot edges
             angle_diff = 1 - abs((self.car_angle % 180 - 90) / 90)
-            return (True, angle_diff)
-        return (False, 0)
+
+            if angle_diff > 0.95:
+                result = (True, angle_diff)
+
+            return result
+        return result
 
 # Simple manual-control loop for debugging the environment with keyboard.
 # Use WASD keys:
