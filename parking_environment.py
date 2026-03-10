@@ -9,7 +9,7 @@ from environment.raycast import Raycast
 from environment.scale import meters_to_pixels
 import gymnasium as gym
 
-class ParkingWarehouse(gym.Env):
+class ParkingEnvironment(gym.Env):
     """
     A simple 2D parking-lot environment for a single car.
 
@@ -33,18 +33,27 @@ class ParkingWarehouse(gym.Env):
     turn_speed = 50.0
     car_speed = 50.0
     dt = 1 / 60
-    max_step = 1000
+    max_step = 1000 #float("inf")
 
     step_penalty = -0.01
     collision_penalty = -10
-    parked_reward = 10
-    closer_to_park_spot_reward = 0.10
+    parked_reward = 50
+    closer_to_park_spot_reward = 0.005
 
-    def __init__(self):
+    distance_threshold_start = 0.2
+    distance_threshold_end = 0.01
+    angle_threshold_start = 0.0
+    angle_threshold_end = 0.95
+    curriculum_episodes = 100000  # episodes to go from start to final threshold
+
+    def __init__(self, render_mode=None):
         """Initialize pygame, convert all geometry from meters to pixels,
         and pre-compute static structures like walls and parking spots."""
 
+        self.render_mode = render_mode
+
         self.observation_space = gym.spaces.Dict({
+            "target_relative_pos": gym.spaces.Box(-1, 1, shape=(2, ), dtype=np.float32),
             "distance": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
             "car_angle": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
             "velocity": gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
@@ -52,6 +61,10 @@ class ParkingWarehouse(gym.Env):
             "raycasts": gym.spaces.Box(0, 1, shape=(8,), dtype=np.float32),
             })
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+        self.episode_count = 0
+        self.distance_threshold = self.distance_threshold_start
+        self.angle_threshold = self.angle_threshold_start
 
         pygame.init()
         self.screen = None
@@ -110,6 +123,13 @@ class ParkingWarehouse(gym.Env):
         """Reset the environment state and randomly choose a free parking spot."""
         super().reset(seed=seed)
 
+        # Advance curriculums
+        self.episode_count += 1
+        t = min(self.episode_count / self.curriculum_episodes, 1.0)  # 0.0 → 1.0
+
+        self.distance_threshold = self.distance_threshold_start - t * (self.distance_threshold_start - self.distance_threshold_end)
+        self.angle_threshold = self.angle_threshold_start + t * (self.angle_threshold_end - self.angle_threshold_start)
+
         self.velocity = 0
         self.angular_velocity = 0
         self.car_angle = 0
@@ -119,10 +139,15 @@ class ParkingWarehouse(gym.Env):
         self.original_car_surf = pygame.Surface((self.car_width_pixels, self.car_height_pixels), pygame.SRCALPHA)
         self.original_car_surf.fill(Colors.CAR)
         self.original_car_rect = self.original_car_surf.get_rect(center=self.car_pos)
+        
+        self.rotated_car_surf = pygame.transform.rotate(self.original_car_surf, self.car_angle)
+        self.rotated_car_rect = self.rotated_car_surf.get_rect(center=self.original_car_rect.center)
 
         self.static_BG.fill(Colors.BACKGROUND)
 
         self.current_step = 0
+
+        self.last_distance = 1
 
         # Randomly mark some parking spots as occupied by parked cars
         parked_cars = []
@@ -164,12 +189,17 @@ class ParkingWarehouse(gym.Env):
         self.obstacles_mask = pygame.mask.from_surface(self.obstacles_surf)
         self.car_mask = pygame.mask.from_surface(self.original_car_surf)
 
-        return self.get_obs, {}
+        return self.get_obs(), {}
 
     def render(self):
         """Draw the current frame: static background, car and raycasts."""
         if not self.screen:
-            self.screen = pygame.display.set_mode((self.playground_width_pixels, self.playground_height_pixels))
+            if self.render_mode == "human":
+                self.screen = pygame.display.set_mode((self.playground_width_pixels, self.playground_height_pixels))
+            else:
+                self.screen = pygame.Surface(
+                    (self.playground_width_pixels, self.playground_height_pixels)
+                )
 
         self.screen.blit(self.static_BG, (0, 0))
 
@@ -185,9 +215,10 @@ class ParkingWarehouse(gym.Env):
                 pygame.draw.line(self.screen, Colors.WALL, raycast.start_pos, raycast.end_pos)
 
         # Keep the window responsive and update the display at ~60 FPS
-        pygame.event.pump()
-        pygame.display.flip()
-        self.clock.tick(60)
+        if self.render_mode == "human":
+            pygame.event.pump()
+            pygame.display.flip()
+            self.clock.tick(60)
 
     def get_raycast(self):
         """Cast rays from the corners and side midpoints of the car.
@@ -269,6 +300,12 @@ class ParkingWarehouse(gym.Env):
         # Distance from car center to the target parking spot center, normalized
         distance_between = Vector2(self.car_pos).distance_to(Vector2(self.target_parking_spot.center)) / self.max_distance_car_spot
 
+        dx = self.target_parking_spot.center[0] - self.car_pos[0]
+        dy = self.target_parking_spot.center[1] - self.car_pos[1]
+
+        dx_normalized = dx / self.playground_width_pixels
+        dy_normalized = dy / self.playground_height_pixels
+
         #print(f"angular_velocity: {car_angular_velocity}")
         #print(f"velocity: {car_velocity}")
         #print(f"angle: {angle}")
@@ -276,16 +313,19 @@ class ParkingWarehouse(gym.Env):
         #print(f"raycasts: {raycasts}")
         #print("-------------------------------------------")
 
+        #print(f"dx: {dx_normalized}, dy: {dy_normalized}")
+
         return {
             # raycasts: values from 0.0 (very close obstacle) to 1.0 (no hit)
             # car_angle: current car angle normalized to [0, 1]
             # velocity: signed forward/backward speed command ([-1, 1])
             # angular_velocity: normalized steering command after processing
-            "distance": distance_between,
-            "car_angle": angle,
-            "velocity": car_velocity,
-            "angular_velocity": car_angular_velocity,
-            "raycasts": raycasts
+            "target_relative_pos": np.array([dx_normalized, dy_normalized], dtype=np.float32),
+            "distance": np.array([distance_between], dtype=np.float32),
+            "car_angle": np.array([angle], dtype=np.float32),
+            "velocity": np.array([car_velocity], dtype=np.float32),
+            "angular_velocity": np.array([car_angular_velocity], dtype=np.float32),
+            "raycasts": np.array(raycasts, dtype=np.float32)
         }
 
     def step(self, action):
@@ -317,8 +357,8 @@ class ParkingWarehouse(gym.Env):
 
         x, y = self.car_pos
 
-        x_new = x + velocity_x * self.dt
-        y_new = y + velocity_y * self.dt
+        x_new = float(x + velocity_x * self.dt)
+        y_new = float(y + velocity_y * self.dt)
 
         # Update car position and rect center
         self.car_pos = (x_new, y_new)
@@ -339,15 +379,21 @@ class ParkingWarehouse(gym.Env):
         observation = self.get_obs()
         truncated = False
 
-        parking_info = self.check_parking_spot(observation["distance"])
+        distance_diff = self.last_distance - float(observation["distance"][0])
+
+        reward += distance_diff * 5.0
+
+        self.last_distance = float(observation["distance"][0])
+
+        parking_info = self.check_parking_spot(observation["distance"][0])
 
         if self.check_collison():
             reward += self.collision_penalty
             terminated = True
 
-        if observation["distance"] < self.closest_to_park_spot:
-            self.closer_to_park_spot = observation["distance"]
-            reward += self.closer_to_park_spot_reward
+        #if observation["distance"][0] < self.closest_to_park_spot:
+        #    self.closest_to_park_spot = observation["distance"][0]
+        #    reward += self.closer_to_park_spot_reward + self.closer_to_park_spot_reward * (1 - float(observation["distance"][0]))
 
         if parking_info[0]:
             reward += self.parked_reward
@@ -380,7 +426,7 @@ class ParkingWarehouse(gym.Env):
 
         result = (False, 0)
 
-        if distance > 0.01:
+        if distance > self.distance_threshold:
             return result
 
         car_top_left_corner_offset = Vector2(-self.car_width_pixels / 2, -self.car_height_pixels / 2)
@@ -401,35 +447,36 @@ class ParkingWarehouse(gym.Env):
             # angle_diff rewards car angles close to perpendicular relative to spot edges
             angle_diff = 1 - abs((self.car_angle % 180 - 90) / 90)
 
-            if angle_diff > 0.95:
+            if angle_diff > self.angle_threshold:
                 result = (True, angle_diff)
 
             return result
         return result
 
-# Simple manual-control loop for debugging the environment with keyboard.
-# Use WASD keys:
-# - A / D: steer left / right
-# - W / S: drive forward / reverse
-# Close the window or interrupt the process to stop.
-# This block runs only when the module is executed directly.
-# (In RL training, Gym would call reset/step instead.)
-# NOTE: This is intentionally kept minimal and blocking.
-a = ParkingWarehouse()
-a.reset()
-while True:
-    keys = pygame.key.get_pressed()
-    steer_action, gas_action = 0, 0
-    if keys[pygame.K_a]:
-        steer_action = -1
-    elif keys[pygame.K_d]:
-        steer_action = 1
-    
-    if keys[pygame.K_w]:
-        gas_action = 1
-    elif keys[pygame.K_s]:
-        gas_action = -1
-    observation, reward, terminated, truncated, info = a.step([steer_action, gas_action])
-    if terminated or truncated:
-        a.reset()
-    a.render()
+if __name__ == "__main__":
+    # Simple manual-control loop for debugging the environment with keyboard.
+    # Use WASD keys:
+    # - A / D: steer left / right
+    # - W / S: drive forward / reverse
+    # Close the window or interrupt the process to stop.
+    # This block runs only when the module is executed directly.
+    # (In RL training, Gym would call reset/step instead.)
+    # NOTE: This is intentionally kept minimal and blocking.
+    a = ParkingEnvironment(render_mode="human")
+    a.reset()
+    while True:
+        keys = pygame.key.get_pressed()
+        steer_action, gas_action = 0, 0
+        if keys[pygame.K_a]:
+            steer_action = -1
+        elif keys[pygame.K_d]:
+            steer_action = 1
+        
+        if keys[pygame.K_w]:
+            gas_action = 1
+        elif keys[pygame.K_s]:
+            gas_action = -1
+        observation, reward, terminated, truncated, info = a.step([steer_action, gas_action])
+        if terminated or truncated:
+            a.reset()
+        a.render()
