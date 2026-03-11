@@ -10,7 +10,7 @@ model = PPO("MultiInputPolicy", env, verbose=1)
 
 print("start training")
 
-model.learn(total_timesteps=5_000_000)
+model.learn(total_timesteps=300_000)
 
 model.save("models/my_custom_ppo_agent")
 print("model saved")

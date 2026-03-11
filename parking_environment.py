@@ -20,6 +20,7 @@ class ParkingEnvironment(gym.Env):
     observations based on distance to the target, car orientation and
     raycast distances to surrounding obstacles.
     """
+    parking_spot_angle = 90
     parking_spot_width = 4
     parking_spot_height = 6
     car_width, car_height = 4.46, 1.80
@@ -27,7 +28,7 @@ class ParkingEnvironment(gym.Env):
     playground_width = parking_spot_width * 4 + wall_width * 2
     playground_height = (parking_spot_height * 2) + (wall_width * 2) + 5
     parking_spot_count_on_side = 4
-    parked_cars_count = 4
+    parked_cars_count = 0
     raycast_length = 50.0
     car_default_center = (playground_width / 2, playground_height / 2)
     turn_speed = 50.0
@@ -36,7 +37,7 @@ class ParkingEnvironment(gym.Env):
     max_step = 1000 #float("inf")
 
     step_penalty = -0.01
-    collision_penalty = -10
+    collision_penalty = -25
     parked_reward = 50
     closer_to_park_spot_reward = 0.005
 
@@ -44,7 +45,7 @@ class ParkingEnvironment(gym.Env):
     distance_threshold_end = 0.01
     angle_threshold_start = 0.0
     angle_threshold_end = 0.95
-    curriculum_episodes = 100000  # episodes to go from start to final threshold
+    curriculum_episodes = 1000  # episodes to go from start to final threshold
 
     def __init__(self, render_mode=None):
         """Initialize pygame, convert all geometry from meters to pixels,
@@ -53,12 +54,14 @@ class ParkingEnvironment(gym.Env):
         self.render_mode = render_mode
 
         self.observation_space = gym.spaces.Dict({
+            "targed_angle_diff": gym.spaces.Box(-1, 1, shape=(1, ), dtype=np.float32),
             "target_relative_pos": gym.spaces.Box(-1, 1, shape=(2, ), dtype=np.float32),
             "distance": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
             "car_angle": gym.spaces.Box(0, 1, shape=(1,), dtype=np.float32),
             "velocity": gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
             "angular_velocity": gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
             "raycasts": gym.spaces.Box(0, 1, shape=(8,), dtype=np.float32),
+            "raycasts_target_spot": gym.spaces.Box(0, 1, shape=(8,), dtype=np.float32),
             })
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
@@ -207,12 +210,19 @@ class ParkingEnvironment(gym.Env):
 
         # Compute current raycasts relative to car position and orientation
         raycasts = self.get_raycast()
+        raycasts_obstacles = raycasts[0]
+        raycast_target_spot = raycasts[1]
 
-        for raycast in raycasts:
+        for raycast in raycasts_obstacles:
             if raycast.hit_info.point:
                 pygame.draw.line(self.screen, Colors.WALL, raycast.start_pos, raycast.hit_info.point, width=2)
             else:
                 pygame.draw.line(self.screen, Colors.WALL, raycast.start_pos, raycast.end_pos)
+
+        for raycast in raycast_target_spot:
+            if raycast.hit_info.point:
+                pygame.draw.line(self.screen, Colors.CAR, raycast.start_pos, raycast.hit_info.point, width=2)
+            
 
         # Keep the window responsive and update the display at ~60 FPS
         if self.render_mode == "human":
@@ -263,8 +273,14 @@ class ParkingEnvironment(gym.Env):
         # info for raycast [(start_pos, end_post, ((hit_point), distance))]
         #return [(raycast[0], raycast[1], self.check_raycast(raycast)) for raycast in rays]
         return [
-            Raycast(start_pos=raycast[0], end_pos=raycast[1], hit_info=self.check_raycast(raycast))
-            for raycast in rays
+            [
+                Raycast(start_pos=raycast[0], end_pos=raycast[1], hit_info=self.check_raycast(raycast))
+                for raycast in rays
+            ],
+            [
+                Raycast(start_pos=raycast[0], end_pos=raycast[1], hit_info=self.check_raycast_parking_spot(raycast))
+                for raycast in rays
+            ]
         ]
 
     def check_raycast(self, raycast: tuple[Vector2, Vector2]):
@@ -291,14 +307,34 @@ class ParkingEnvironment(gym.Env):
 
         return HitPoint(point=closest_hit, distance=distance)
 
+    def check_raycast_parking_spot(self, raycast: tuple[Vector2, Vector2]):
+        closest_hit = None
+        dist = self.raycast_length
+
+        raycast_start, raycast_end = raycast
+
+        hit_points = self.target_parking_spot.clipline(raycast_start, raycast_end)
+        if hit_points:
+            start_p, end_p = hit_points
+            dist = Vector2(raycast_start).distance_to(start_p)
+            closest_hit = start_p
+
+        # Normalize distance to [0, 1]; 1.0 means no hit within ray length
+        distance: float = np.clip(dist / self.raycast_length, 0.0, 1.0)
+
+        return HitPoint(point=closest_hit, distance=distance)
+
     def get_obs(self):
         """Build the observation dictionary used by the agent."""
-        raycasts: list[float] = [raycast.hit_info.distance for raycast in self.get_raycast()]
+        raycasts: list[float] = [raycast.hit_info.distance for raycast in self.get_raycast()[0]]
+        raycasts_target_spot: list[float] = [raycast.hit_info.distance for raycast in self.get_raycast()[1]]
         car_angular_velocity = self.angular_velocity
         car_velocity = self.velocity
         angle = self.car_angle / 360
         # Distance from car center to the target parking spot center, normalized
         distance_between = Vector2(self.car_pos).distance_to(Vector2(self.target_parking_spot.center)) / self.max_distance_car_spot
+
+        self.angle_diff = (self.parking_spot_angle - self.car_angle % 180) / self.parking_spot_angle
 
         dx = self.target_parking_spot.center[0] - self.car_pos[0]
         dy = self.target_parking_spot.center[1] - self.car_pos[1]
@@ -306,6 +342,8 @@ class ParkingEnvironment(gym.Env):
         dx_normalized = dx / self.playground_width_pixels
         dy_normalized = dy / self.playground_height_pixels
 
+
+        #print(raycasts_target_spot)
         #print(f"angular_velocity: {car_angular_velocity}")
         #print(f"velocity: {car_velocity}")
         #print(f"angle: {angle}")
@@ -320,12 +358,14 @@ class ParkingEnvironment(gym.Env):
             # car_angle: current car angle normalized to [0, 1]
             # velocity: signed forward/backward speed command ([-1, 1])
             # angular_velocity: normalized steering command after processing
+            "targed_angle_diff": np.array([self.angle_diff], dtype=np.float32),
             "target_relative_pos": np.array([dx_normalized, dy_normalized], dtype=np.float32),
             "distance": np.array([distance_between], dtype=np.float32),
             "car_angle": np.array([angle], dtype=np.float32),
             "velocity": np.array([car_velocity], dtype=np.float32),
             "angular_velocity": np.array([car_angular_velocity], dtype=np.float32),
-            "raycasts": np.array(raycasts, dtype=np.float32)
+            "raycasts": np.array(raycasts, dtype=np.float32),
+            "raycasts_target_spot": np.array(raycasts_target_spot, dtype=np.float32),
         }
 
     def step(self, action):
@@ -379,11 +419,11 @@ class ParkingEnvironment(gym.Env):
         observation = self.get_obs()
         truncated = False
 
-        distance_diff = self.last_distance - float(observation["distance"][0])
-
-        reward += distance_diff * 5.0
-
-        self.last_distance = float(observation["distance"][0])
+        #distance_diff = self.last_distance - float(observation["distance"][0])
+#
+        #reward += distance_diff * 5.0
+#
+        #self.last_distance = float(observation["distance"][0])
 
         parking_info = self.check_parking_spot(observation["distance"][0])
 
@@ -391,9 +431,12 @@ class ParkingEnvironment(gym.Env):
             reward += self.collision_penalty
             terminated = True
 
-        #if observation["distance"][0] < self.closest_to_park_spot:
-        #    self.closest_to_park_spot = observation["distance"][0]
-        #    reward += self.closer_to_park_spot_reward + self.closer_to_park_spot_reward * (1 - float(observation["distance"][0]))
+        if observation["distance"][0] < 0.2 and self.angle_diff < 0.1:
+            reward += 5 + 5 * (1 - abs(self.angle_diff))
+
+        if observation["distance"][0] < self.closest_to_park_spot:
+            self.closest_to_park_spot = observation["distance"][0]
+            reward += self.closer_to_park_spot_reward + self.closer_to_park_spot_reward * (1 - float(observation["distance"][0]))
 
         if parking_info[0]:
             reward += self.parked_reward
