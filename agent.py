@@ -1,21 +1,27 @@
 from parking_environment import ParkingEnvironment
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.callbacks import BaseCallback
 
-env = ParkingEnvironment()
+#class RenderCallback(BaseCallback):
+#    def _on_step(self) -> bool:
+#        self.training_env.env_method("render")
+#        return True
 
-check_env(env)
-
-model = PPO("MultiInputPolicy", env, verbose=1)
-
-print("start training")
-
-model.learn(total_timesteps=300_000)
-
-model.save("models/my_custom_ppo_agent")
-print("model saved")
-
-env.close()
+#env = ParkingEnvironment()
+#
+#check_env(env)
+#
+#model = PPO("MultiInputPolicy", env, verbose=1)
+#
+#print("start training")
+#
+#model.learn(total_timesteps=100_000)
+#
+#model.save("models/my_custom_ppo_agent")
+#print("model saved")
+#
+#env.close()
 
 eval_env = ParkingEnvironment(render_mode="human")
 

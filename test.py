@@ -132,7 +132,7 @@ class ParkingEnvironment(gym.Env):
         # Advance curriculums
         self.episode_count += 1
         # t goes from 0.0 to 1.0 over the first curriculum_episodes episodes
-        t = min(self.episode_count / self.curriculum_episodes, 1.0)  # 0.0 → 1.0
+        t = min(self.episode_count / self.curriculum_episodes, 1.0)
 
         # Gradually tighten how close and how well-aligned the car must be to succeed
         self.distance_threshold = self.distance_threshold_start - t * (self.distance_threshold_start - self.distance_threshold_end)
@@ -185,9 +185,10 @@ class ParkingEnvironment(gym.Env):
 
         # Choose one of the free spots as the target parking location
         self.target_parking_spot = empty_parking_spots[self.np_random.integers(0, len(empty_parking_spots))]
+        # Draw the target spot filled (not just outlined) so the agent can see it
         pygame.draw.rect(self.static_BG, Colors.PARKING_SPOT, self.target_parking_spot)
 
-        # Store the initial normalized distance to the target spot
+        # Store the initial normalized distance to the target spot for reward shaping
         self.last_dx = abs(self.target_parking_spot.center[0] - self.car_pos[0]) / self.playground_width_pixels
         self.last_dy = abs(self.target_parking_spot.center[1] - self.car_pos[1]) / self.playground_height_pixels
 
@@ -241,13 +242,13 @@ class ParkingEnvironment(gym.Env):
             else:
                 pygame.draw.line(self.screen, Colors.WALL, raycast.start_pos, raycast.end_pos)
 
-         # Draw parking-spot rays only when they actually hit the target spot
+        # Draw parking-spot rays only when they actually hit the target spot
         for raycast in raycast_target_spot:
             if raycast.hit_info.point:
                 pygame.draw.line(self.screen, Colors.CAR, raycast.start_pos, raycast.hit_info.point, width=2)
             
 
-        # Keep the window responsive and update the display at 60 FPS
+        # Keep the window responsive and update the display at ~60 FPS
         if self.render_mode == "human":
             pygame.event.pump()
             pygame.display.flip()
@@ -260,7 +261,6 @@ class ParkingEnvironment(gym.Env):
         direction of that point (relative to the center). The distances are
         later used as part of the observation for obstacle awareness.
         """
-
         # Four corners of the car in local (unrotated) space
         corners_offsets = [
             Vector2(-self.car_width_pixels / 2, -self.car_height_pixels / 2),
@@ -317,7 +317,9 @@ class ParkingEnvironment(gym.Env):
 
         raycast_start, raycast_end = raycast
 
+        # Check every obstacle and keep only the nearest hit
         for obstacle in self.obstacles:
+            # clipline returns the segment of the ray that lies inside the rectangle
             hit_points = obstacle.clipline(raycast_start, raycast_end)
 
             if hit_points:
@@ -335,7 +337,9 @@ class ParkingEnvironment(gym.Env):
         return HitPoint(point=closest_hit, distance=distance)
 
     def check_raycast_parking_spot(self, raycast: tuple[Vector2, Vector2]):
+        """Return the intersection (if any) of a ray with the target parking spot."""
         closest_hit = None
+        # Default to max length so no-hit normalizes to 1.0
         dist = self.raycast_length
 
         raycast_start, raycast_end = raycast
@@ -353,15 +357,20 @@ class ParkingEnvironment(gym.Env):
 
     def get_obs(self):
         """Build the observation dictionary used by the agent."""
+        # Get only the obstacle raycast distances (index 0), not the parking-spot ones
         raycasts: list[float] = [raycast.hit_info.distance for raycast in self.get_raycast()[0]]
         car_velocity = self.velocity
+        # Normalize angle from degrees [0, 360] to [0, 1]
         angle = self.car_angle / 360
 
+        # How far the car angle is from the parking spot angle, normalized to [-1, 1]
         self.angle_diff = (self.parking_spot_angle - self.car_angle % 180) / self.parking_spot_angle
 
+        # Vector from the car to the target parking spot center
         dx = self.target_parking_spot.center[0] - self.car_pos[0]
         dy = self.target_parking_spot.center[1] - self.car_pos[1]
 
+        # Normalize relative position by playground size so values stay in [-1, 1]
         dx_normalized = dx / self.playground_width_pixels
         dy_normalized = dy / self.playground_height_pixels
 
@@ -426,6 +435,7 @@ class ParkingEnvironment(gym.Env):
         # Convert car orientation to radians to compute velocity components
         rad = math.radians(self.car_angle)
 
+        # Break velocity into x and y components based on car direction
         velocity_x = math.cos(rad) * gas_action * self.car_speed
         velocity_y = -math.sin(rad) * gas_action * self.car_speed
 
@@ -456,8 +466,10 @@ class ParkingEnvironment(gym.Env):
         forward_middle_side_rotated_offset = Vector2(self.car_width_pixels / 2, 0).rotate(-self.car_angle)
         forward_middle_side_pos = self.original_car_rect.center + forward_middle_side_rotated_offset
         
+        # Normalize distance to target so 0 = on top of spot, 1 = max possible distance
         distance_between = Vector2(self.car_pos).distance_to(Vector2(self.target_parking_spot.center)) / self.max_distance_car_spot
 
+        # Give a small reward when the car gets closer to the spot than it ever has this episode
         if distance_between < self.closest_to_park_spot: #and self.looking_at_park_spot():
             self.closest_to_park_spot = distance_between
             reward += self.closer_to_park_spot_reward
@@ -466,10 +478,12 @@ class ParkingEnvironment(gym.Env):
             reward += self.collision_penalty
             terminated = True
 
+        # Success condition: car center is close enough to the parking spot center
         if abs(observation["target_relative_pos"][0]) < 0.1 and abs(observation["target_relative_pos"][1]) < 0.1 :
             reward += self.parked_reward
             terminated = True
 
+        # End the episode if we've hit the step limit without parking or crashing
         if self.current_step >= self.max_step:
             truncated = True
 
@@ -484,6 +498,7 @@ class ParkingEnvironment(gym.Env):
 
     def check_collison(self):
         """Return True if the car collides with any obstacle."""
+        # Offset converts from screen coordinates to mask-local coordinates
         offset_x = -self.rotated_car_rect.x
         offset_y = -self.rotated_car_rect.y
 
@@ -500,9 +515,11 @@ class ParkingEnvironment(gym.Env):
 
         result = (False, 0)
 
+        # Skip the expensive corner check if the car is still too far away
         if distance > self.distance_threshold:
             return result
 
+        # Compute car corner positions in local (unrotated) space
         car_top_left_corner_offset = Vector2(-self.car_width_pixels / 2, -self.car_height_pixels / 2)
         car_bottom_right_corner_offset = Vector2(self.car_width_pixels / 2, self.car_height_pixels / 2)
 
@@ -519,6 +536,7 @@ class ParkingEnvironment(gym.Env):
             and self.target_parking_spot.topleft[0] < car_bottom_right_pos.x < self.target_parking_spot.bottomright[0] 
             and self.target_parking_spot.topleft[1] < car_bottom_right_pos.y < self.target_parking_spot.bottomright[1]):
             # angle_diff rewards car angles close to perpendicular relative to spot edges
+            # 1.0 = perfectly aligned, 0.0 = 90 degrees off
             angle_diff = 1 - abs((self.car_angle % 180 - 90) / 90)
 
             if angle_diff > self.angle_threshold:
@@ -528,8 +546,10 @@ class ParkingEnvironment(gym.Env):
         return result
 
     def looking_at_park_spot(self):
+        """Return True if a ray from the front of the car hits the target parking spot."""
         raycast_offset = Vector2(self.car_width_pixels / 2, 0)
 
+        # Rotate the front-center offset to match the car's current orientation
         rotated_offset = raycast_offset.rotate(-self.car_angle)
         corner_pos = self.original_car_rect.center + rotated_offset 
 
@@ -537,6 +557,7 @@ class ParkingEnvironment(gym.Env):
         ray_direction = rotated_offset.normalize()
 
         start_pos = corner_pos
+        # Cast a long ray forward to see if it reaches the parking spot
         end_pos = start_pos + (ray_direction * 1000.0)
 
         hit_points = self.target_parking_spot.clipline(start_pos, end_pos)
